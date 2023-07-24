@@ -234,10 +234,57 @@ if __name__ == "__main__":
     model = Transformer(**args_13B)
     weights = [torch_load(filename) for filename in WEIGHTS_13B_FILENAMES]
     load_state_dict(model, concat_weights(weights), strict=False)
-  else:
+  elif args.size == "7B":
     print("using 7B model")
     model = Transformer(**args_7B)
     load_state_dict(model, torch_load(WEIGHTS_7B_FILENAME), strict=False)
+  elif args.size == "llama2.c-tinystories":
+    import struct
+
+    def deserialize(f, shape):
+      size = math.prod(shape)
+      b = f.read(size * 4)
+      return Tensor(list(memoryview(b).cast('f'))).reshape(shape).contiguous()
+
+    # f = open('weights/out44m/model44m.bin', 'rb')
+    f = open('weights/out/model.bin', 'rb')
+
+    header = struct.unpack('iiiiiii', f.read(7 * 4))
+    dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, max_seq_len = header
+    multiple_of = 32  # guessed
+    model = Transformer(**{
+      "dim": dim,
+      "n_layers": n_layers,
+      "n_heads": n_heads,
+      "vocab_size": vocab_size,
+      "multiple_of": multiple_of,
+      "norm_eps": 1e-5,
+      "max_seq_len": max_seq_len,
+    })
+    head_dim = dim // n_heads
+
+    state_dict = {}
+    state_dict['tok_embeddings.weight'] = deserialize(f, (vocab_size, dim))
+
+    for i in range(n_layers): state_dict[f'layers.{i}.attention_norm.weight'] = deserialize(f, (dim,))
+    for i in range(n_layers): state_dict[f'layers.{i}.attention.wq.weight'] = deserialize(f, (dim, n_heads * head_dim))
+    for i in range(n_layers): state_dict[f'layers.{i}.attention.wk.weight'] = deserialize(f, (dim, n_kv_heads * head_dim))
+    for i in range(n_layers): state_dict[f'layers.{i}.attention.wv.weight'] = deserialize(f, (dim, n_kv_heads * head_dim))
+    for i in range(n_layers): state_dict[f'layers.{i}.attention.wo.weight'] = deserialize(f, (n_heads * head_dim, dim))
+    for i in range(n_layers): state_dict[f'layers.{i}.ffn_norm.weight'] = deserialize(f, (dim,))
+    for i in range(n_layers): state_dict[f'layers.{i}.feed_forward.w1.weight'] = deserialize(f, (dim, hidden_dim)[::-1])
+    for i in range(n_layers): state_dict[f'layers.{i}.feed_forward.w2.weight'] = deserialize(f, (hidden_dim, dim)[::-1])
+    for i in range(n_layers): state_dict[f'layers.{i}.feed_forward.w3.weight'] = deserialize(f, (dim, hidden_dim)[::-1])
+
+    state_dict['norm.weight'] = deserialize(f, (dim,))
+    state_dict['output.weight'] = state_dict['tok_embeddings.weight']
+
+    # state_dict['freqs_cis.real'] = deserialize(f, (max_seq_len, head_dim // 2))
+    # state_dict['freqs_cis.imag'] = deserialize(f, (max_seq_len, head_dim // 2))
+
+    load_state_dict(model, state_dict, strict=False)
+  else:
+    raise Exception
 
   # *** prompt engineers work here ****
 
@@ -338,7 +385,7 @@ After you are done speaking, output [EOS]. You are not Chad.
     start_pos = len(toks)
   else:
     # non chat bot mode
-    toks = [sp_model.bos_id()] + sp_model.encode(args.prompt)
+    toks = [sp_model.bos_id()] + sp_model.encode(args.prompt.replace('\\n', '\n'))
     start_pos = 0
 
   # print prompt
