@@ -135,7 +135,7 @@ class Transformer:
     self.norm = RMSNorm(dim, norm_eps)
     self.tok_embeddings = Embedding(vocab_size, dim)
     self.output = Linear(dim, vocab_size, bias=False)
-    self.freqs_cis = Tensor(precompute_freqs_cis(dim // n_heads, max_seq_len * 2))
+    self.freqs_cis = Tensor(precompute_freqs_cis(dim // n_heads, max_seq_len))
 
   def __call__(self, tokens:Tensor, start_pos:int):
     _bsz, seqlen = tokens.shape
@@ -244,14 +244,21 @@ if __name__ == "__main__":
     def deserialize(f, shape):
       size = math.prod(shape)
       b = f.read(size * 4)
-      return Tensor(list(memoryview(b).cast('f'))).reshape(shape).contiguous()
+      assert len(b) == size*4, f'read {len(b)}, should be {size*4}'
+      return Tensor(np.array(memoryview(b).cast('f'))).reshape(shape)
 
+    f = open('/mnt/extra-drive/llama2-weights/llama2_13b.bin', 'rb')
+    # f = open('/mnt/extra-drive/llama2-weights/llama2_7b.bin', 'rb')
+    # f = open('/home/kirill/3rdworkspace/llama2.c/model110m.bin', 'rb')
     # f = open('weights/out44m/model44m.bin', 'rb')
-    f = open('weights/out/model.bin', 'rb')
+    # f = open('/home/kirill/3rdworkspace/llama2.c/model.bin', 'rb')
 
     header = struct.unpack('iiiiiii', f.read(7 * 4))
     dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, max_seq_len = header
+    must_load_output = vocab_size < 0
+    vocab_size = abs(vocab_size)
     multiple_of = 32  # guessed
+    # multiple_of = 256
     model = Transformer(**{
       "dim": dim,
       "n_layers": n_layers,
@@ -277,10 +284,19 @@ if __name__ == "__main__":
     for i in range(n_layers): state_dict[f'layers.{i}.feed_forward.w3.weight'] = deserialize(f, (dim, hidden_dim)[::-1])
 
     state_dict['norm.weight'] = deserialize(f, (dim,))
-    state_dict['output.weight'] = state_dict['tok_embeddings.weight']
 
-    # state_dict['freqs_cis.real'] = deserialize(f, (max_seq_len, head_dim // 2))
-    # state_dict['freqs_cis.imag'] = deserialize(f, (max_seq_len, head_dim // 2))
+    state_dict['freqs_cis.real'] = deserialize(f, (1, dim // n_heads // 2, max_seq_len)[::-1])
+    state_dict['freqs_cis.imag'] = deserialize(f, (1, dim // n_heads // 2, max_seq_len)[::-1])
+
+    if must_load_output:
+      state_dict['output.weight'] = deserialize(f, (vocab_size, dim))
+    else:
+      state_dict['output.weight'] = state_dict['tok_embeddings.weight']
+
+    model_freqs_cis = state_dict['freqs_cis.real'].cat(state_dict['freqs_cis.imag'], dim=2)
+    model_freqs_cis = model_freqs_cis.reshape(1, max_seq_len, 1, dim // n_heads // 2, 2)
+
+    state_dict['freqs_cis'] = model_freqs_cis
 
     load_state_dict(model, state_dict, strict=False)
   else:
